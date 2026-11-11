@@ -1,0 +1,19 @@
+[package]
+name = "wmux"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+crossterm = "0.29.0"
+uds_windows = "1.2.1"
+vt100 = "0.18.1"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_System_Pipes", "Win32_Security"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[dev-dependencies]
+portable-pty = "0.9.0"
