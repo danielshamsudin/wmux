@@ -52,10 +52,21 @@ enum Mode {
     /// After a repeatable command (arrows), more of them work without the
     /// prefix until this deadline. Same as tmux `repeat-time`.
     Repeat(Instant),
-    /// Scroll through the active pane's history.
-    Scroll,
+    /// Copy mode: move a cursor through the active pane's history, select,
+    /// and yank. tmux's copy-mode.
+    Scroll(Copy),
     /// Type a new window name.
     Rename(String),
+}
+
+/// Copy-mode cursor and selection. `line` is an absolute line number counted
+/// from the oldest line in history, so it stays put when the viewport scrolls.
+#[derive(Clone, Copy)]
+struct Copy {
+    line: usize,
+    col: u16,
+    /// Selection start (line, col) when a selection is active.
+    anchor: Option<(usize, u16)>,
 }
 
 struct Window {
@@ -124,6 +135,8 @@ struct App {
     cur_client: Option<usize>,
     tx: Sender<Event>,
     cmd: Vec<String>,
+    /// The last text yanked in copy mode. Ctrl-b ] pastes it.
+    copy_buf: String,
     message: Option<(String, Instant)>,
     dirty: bool,
     /// Set when the server must stop. The text goes to attached clients.
@@ -455,7 +468,7 @@ impl App {
                 self.remove_window(wi);
             }
         }
-        if matches!(self.mode, Mode::Scroll) {
+        if matches!(self.mode, Mode::Scroll(_)) {
             self.mode = Mode::Normal;
         }
         self.apply_layout();
@@ -523,7 +536,7 @@ impl App {
                     self.normal_key(k);
                 }
             }
-            Mode::Scroll => self.scroll_key(k),
+            Mode::Scroll(st) => self.scroll_key(k, st),
             Mode::Rename(mut buf) => {
                 match k.code {
                     KeyCode::Enter => {
@@ -600,10 +613,23 @@ impl App {
                 w.zoomed = !w.zoomed;
                 self.apply_layout();
             }
-            KeyCode::Char('[') => self.mode = Mode::Scroll,
+            KeyCode::Char('[') => self.enter_copy(),
             KeyCode::PageUp => {
-                self.mode = Mode::Scroll;
-                self.scroll_key(k);
+                self.enter_copy();
+                if let Mode::Scroll(st) = self.mode {
+                    self.scroll_key(k, st);
+                }
+            }
+            KeyCode::Char(']') => {
+                if !self.copy_buf.is_empty() {
+                    let s = self.copy_buf.clone();
+                    let bracketed = self.active_pane().is_some_and(|p| p.parser.lock().unwrap().screen().bracketed_paste());
+                    if bracketed {
+                        self.send_active(format!("\x1b[200~{s}\x1b[201~").as_bytes());
+                    } else {
+                        self.send_active(s.as_bytes());
+                    }
+                }
             }
             KeyCode::Char(',') => self.mode = Mode::Rename(String::new()),
             KeyCode::Char('d') => {
@@ -613,36 +639,135 @@ impl App {
                 }
             }
             KeyCode::Char('?') => self.msg(
-                "% \" split | arrows move | C-arrows resize | o ; pane | x kill | z zoom | c n p l 0-9 window | & kill win | [ scroll | , rename | d detach",
+                "% \" split | arrows move | C-arrows resize | o ; pane | x kill | z zoom | c n p l 0-9 window | & kill win | [ copy | ] paste | , rename | d detach",
             ),
             _ => {}
         }
         false
     }
 
-    fn scroll_key(&mut self, k: KeyEvent) {
-        self.mode = Mode::Scroll;
-        let Some(pane) = self.active_pane() else { return };
-        let cur = pane.scroll;
-        let page = (pane.rect.h as usize).max(2) - 1;
+    /// Enter copy mode: live view, cursor on the shell's cursor, no selection.
+    fn enter_copy(&mut self) {
+        let start = self.active_pane().map(|pane| {
+            let p = pane.parser.lock().unwrap();
+            let screen = p.screen();
+            let (r, c) = screen.cursor_position();
+            (screen.scrollback_len() + r as usize, c)
+        });
+        let Some((line, col)) = start else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        self.set_scroll(0); // show the live view first
+        self.mode = Mode::Scroll(Copy { line, col, anchor: None });
+        self.dirty = true;
+    }
+
+    fn scroll_key(&mut self, k: KeyEvent, mut st: Copy) {
+        // Pane geometry and history length, read once.
+        let (rows, cols, cur_scroll, sb) = {
+            let Some(pane) = self.active_pane() else {
+                self.mode = Mode::Normal;
+                return;
+            };
+            let p = pane.parser.lock().unwrap();
+            (pane.rect.h.max(1) as usize, pane.rect.w.max(1), pane.scroll, p.screen().scrollback_len())
+        };
+        let max_line = sb + rows - 1; // last live row
+        let page = rows.max(2) - 1;
         let half = page / 2;
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let n = match k.code {
-            KeyCode::Up | KeyCode::Char('k') => cur + 1,
-            KeyCode::Down | KeyCode::Char('j') => cur.saturating_sub(1),
-            KeyCode::Char('u') if ctrl => cur + half,
-            KeyCode::Char('d') if ctrl => cur.saturating_sub(half),
-            KeyCode::PageUp | KeyCode::Char('b') => cur + page,
-            KeyCode::PageDown | KeyCode::Char('f') => cur.saturating_sub(page),
-            KeyCode::Char('g') | KeyCode::Home => usize::MAX,
-            KeyCode::Char('G') | KeyCode::End => 0,
+
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k') => st.line = st.line.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => st.line = (st.line + 1).min(max_line),
+            KeyCode::Left | KeyCode::Char('h') => st.col = st.col.saturating_sub(1),
+            KeyCode::Right | KeyCode::Char('l') => st.col = (st.col + 1).min(cols - 1),
+            KeyCode::Char('u') if ctrl => st.line = st.line.saturating_sub(half),
+            KeyCode::Char('d') if ctrl => st.line = (st.line + half).min(max_line),
+            KeyCode::PageUp | KeyCode::Char('b') => st.line = st.line.saturating_sub(page),
+            KeyCode::PageDown | KeyCode::Char('f') => st.line = (st.line + page).min(max_line),
+            KeyCode::Char('g') => st.line = 0,
+            KeyCode::Char('G') => st.line = max_line,
+            KeyCode::Home | KeyCode::Char('0') => st.col = 0,
+            KeyCode::End | KeyCode::Char('$') => st.col = cols - 1,
+            KeyCode::Char(' ') | KeyCode::Char('v') => {
+                st.anchor = if st.anchor.is_some() { None } else { Some((st.line, st.col)) };
+            }
+            KeyCode::Char('y') | KeyCode::Enter => {
+                let text = self.copy_text(&st);
+                let n = text.chars().count();
+                self.copy_buf = text.clone();
+                let ok = crate::clip::set(&text);
+                self.msg(format!("copied {n} chars{}", if ok { "" } else { " (clipboard busy)" }));
+                self.mode = Mode::Normal;
+                self.set_scroll(0);
+                return;
+            }
             KeyCode::Char('q') | KeyCode::Esc => {
                 self.mode = Mode::Normal;
-                0
+                self.set_scroll(0);
+                self.dirty = true;
+                return;
             }
-            _ => cur,
+            _ => {}
+        }
+
+        // Move the viewport the least amount that keeps the cursor on screen.
+        let top = sb - cur_scroll;
+        let new_scroll = if st.line < top {
+            sb - st.line
+        } else if st.line > top + rows - 1 {
+            sb.saturating_sub(st.line + 1 - rows)
+        } else {
+            cur_scroll
         };
-        self.set_scroll(n);
+        self.set_scroll(new_scroll);
+        self.mode = Mode::Scroll(st);
+        self.dirty = true;
+    }
+
+    /// Read screen column `col`'s text for an absolute history line, one entry
+    /// per column ("" for the second half of a wide character).
+    fn read_abs_cols(&self, p: &mut crate::pane::Parser, sb: usize, line: usize, cols: u16) -> Vec<String> {
+        let (scroll, row) = if line < sb { (sb - line, 0u16) } else { (0, (line - sb) as u16) };
+        p.screen_mut().set_scrollback(scroll);
+        let screen = p.screen();
+        (0..cols)
+            .map(|col| match screen.cell(row, col) {
+                Some(cell) if cell.is_wide_continuation() => String::new(),
+                Some(cell) if cell.has_contents() => cell.contents().to_string(),
+                _ => " ".to_string(),
+            })
+            .collect()
+    }
+
+    /// The selected text (or the cursor's whole line when nothing is selected),
+    /// with trailing blanks trimmed and lines joined by CR-LF.
+    fn copy_text(&self, st: &Copy) -> String {
+        let Some(pane) = self.active_pane() else { return String::new() };
+        let cols = pane.rect.w.max(1);
+        let mut p = pane.parser.lock().unwrap();
+        let saved = p.screen().scrollback();
+        let sb = p.screen().scrollback_len();
+        let (a, b) = match st.anchor {
+            Some(a) => (a, (st.line, st.col)),
+            None => ((st.line, 0), (st.line, cols - 1)),
+        };
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let mut out = String::new();
+        for line in lo.0..=hi.0 {
+            let row = self.read_abs_cols(&mut p, sb, line, cols);
+            let start = if line == lo.0 { lo.1 as usize } else { 0 };
+            let end = if line == hi.0 { hi.1 as usize } else { cols as usize - 1 };
+            let seg: String = row.get(start..=end.min(row.len().saturating_sub(1))).unwrap_or(&[]).concat();
+            out.push_str(seg.trim_end());
+            if line != hi.0 {
+                out.push_str("\r\n");
+            }
+        }
+        p.screen_mut().set_scrollback(saved);
+        out
     }
 
     // ---- drawing -------------------------------------------------------
@@ -659,6 +784,8 @@ impl App {
         let mut cursor = None;
         let mut shape = 0u8;
         let mut active_rect = Rect::default();
+        let copy = if let Mode::Scroll(st) = &self.mode { Some(*st) } else { None };
+        let mut copy_cursor = None;
 
         for (id, rect) in &panes {
             if win.zoomed && *id != win.active {
@@ -671,6 +798,18 @@ impl App {
             let mut p = pane.parser.lock().unwrap();
             p.screen_mut().set_scrollback(pane.scroll);
             let screen = p.screen();
+            let sb_len = screen.scrollback_len();
+            // The selection, as absolute (line, col) bounds, for the active pane.
+            let sel = if *id == win.active {
+                copy.and_then(|st| {
+                    st.anchor.map(|anc| {
+                        let b = (st.line, st.col);
+                        if anc <= b { (anc, b) } else { (b, anc) }
+                    })
+                })
+            } else {
+                None
+            };
             for row in 0..rect.h {
                 for col in 0..rect.w {
                     let Some(cell) = screen.cell(row, col) else { continue };
@@ -680,6 +819,12 @@ impl App {
                     if cell.italic() { attrs |= ITALIC }
                     if cell.underline() { attrs |= UNDERLINE }
                     if cell.inverse() { attrs |= INVERSE }
+                    if let Some((lo, hi)) = sel {
+                        let pos = ((sb_len - pane.scroll) + row as usize, col);
+                        if lo <= pos && pos <= hi {
+                            attrs ^= INVERSE; // highlight, and keep already-inverse cells readable
+                        }
+                    }
                     let style = Style { fg: cell.fgcolor().into(), bg: cell.bgcolor().into(), attrs };
                     let ch = if cell.is_wide_continuation() {
                         ""
@@ -713,6 +858,14 @@ impl App {
                 let label = format!("[{}/{}]", pane.scroll, screen.scrollback_len());
                 let x = (rect.x + rect.w).saturating_sub(label.len() as u16);
                 grid.text(x, rect.y, &label, Style { fg: Color::Idx(0), bg: Color::Idx(3), attrs: 0 });
+            }
+            if let (true, Some(st)) = (*id == win.active, copy) {
+                let top = sb_len - pane.scroll;
+                if st.line >= top && st.line < top + rect.h as usize {
+                    let cy = (st.line - top) as u16;
+                    let cx = st.col.min(rect.w.saturating_sub(1));
+                    copy_cursor = Some((rect.x + cx, rect.y + cy));
+                }
             }
             p.screen_mut().set_scrollback(0);
         }
@@ -765,7 +918,10 @@ impl App {
         }
         let mut x = match self.mode {
             Mode::Prefix | Mode::Repeat(_) => grid.text(0, y, "[^B] ", hi),
-            Mode::Scroll => grid.text(0, y, "[scroll q:exit] ", hi),
+            Mode::Scroll(st) => {
+                let s = if st.anchor.is_some() { "[copy  y:copy  q:exit] " } else { "[copy  v:select  q:exit] " };
+                grid.text(0, y, s, hi)
+            }
             _ => grid.text(0, y, &format!("[{}] ", self.name), bar),
         };
         if let Some((m, t)) = &self.message {
@@ -797,7 +953,11 @@ impl App {
             grid.text(cx, y, &clock, bar);
         }
 
-        let cursor = if matches!(self.mode, Mode::Normal | Mode::Prefix | Mode::Repeat(_)) { cursor } else { None };
+        let (cursor, shape) = match self.mode {
+            Mode::Normal | Mode::Prefix | Mode::Repeat(_) => (cursor, shape),
+            Mode::Scroll(_) => (copy_cursor, 2), // steady block on the copy cursor
+            _ => (None, shape),
+        };
         for c in self.clients.values_mut().filter(|c| c.attached) {
             let frame = c.renderer.flush(&self.grid, cursor, shape);
             let _ = c.tx.send(proto::encode(proto::FRAME, frame.as_bytes()));
@@ -856,6 +1016,7 @@ pub fn run(name: String, w: u16, h: u16, cmd: Vec<String>) -> Result<()> {
         cur_client: None,
         tx,
         cmd,
+        copy_buf: String::new(),
         message: None,
         dirty: true,
         quit: None,

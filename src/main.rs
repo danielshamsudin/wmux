@@ -19,6 +19,7 @@ macro_rules! log {
     };
 }
 
+mod clip;
 mod client;
 mod conpty;
 mod keys;

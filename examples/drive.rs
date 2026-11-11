@@ -145,6 +145,23 @@ fn main() {
     check(ls.contains("no server running"), "kill-session removes it");
     drop(a);
 
+    // 6b. Copy mode: copy a line from scrollback, then paste it with Ctrl-b ].
+    let _ = wmux(&["kill-session", "-t", "drvc"]);
+    let c = Term::open(80, 20, &["new", "-s", "drvc", "cmd.exe"]);
+    sleep(Duration::from_millis(2000));
+    c.send(b"echo UNIQ_ABC\r", 700); // prints UNIQ_ABC just above the prompt
+    c.send(b"\x02[", 400); // Ctrl-b [ : enter copy mode
+    c.send(b"\x1b[A\x1b[A", 300); // up two lines (past cmd's blank line) onto UNIQ_ABC
+    c.send(b"y", 500); // yank the cursor line, leave copy mode
+    c.show("C: after yank (status shows 'copied')");
+    check(c.contains("copied 8 chars"), "copy mode yanked 8 chars (UNIQ_ABC)");
+    c.send(b"echo PFX_", 300); // start a command at the prompt
+    c.send(b"\x02]", 400); // Ctrl-b ] : paste the copy buffer -> echo PFX_UNIQ_ABC
+    c.send(b"\r", 700);
+    c.show("C: after paste and run");
+    check(c.contains("PFX_UNIQ_ABC"), "Ctrl-b ] pasted the copied text and it ran");
+    let _ = wmux(&["kill-session", "-t", "drvc"]);
+
     // 7. Default shell (pwsh / powershell with PSReadLine), with a split.
     let p = Term::open(100, 24, &["new", "-s", "drvps"]);
     sleep(Duration::from_millis(5000));

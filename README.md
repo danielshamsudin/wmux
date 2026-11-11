@@ -45,12 +45,31 @@ size of the client that typed last (tmux `window-size latest`).
 | `n` / `p` / `l` / `0-9` | next / previous / last / numbered window |
 | `,` | rename window |
 | `&` | kill window |
-| `[` or PgUp | scroll mode: arrows, j/k, PgUp/PgDn, Ctrl-u/d, g/G, q to exit |
+| `[` or PgUp | copy mode (see below) |
+| `]` | paste the last copied text |
 | Ctrl-b | send a literal Ctrl-b |
 | `d` | detach |
 | `?` | key help in the status bar |
 
 The session ends when its last shell exits.
+
+### Copy mode (`Ctrl-b [`)
+
+Move a cursor through the pane and its scrollback, select text, and copy it.
+
+| Key | Action |
+|---|---|
+| arrows / `h` `j` `k` `l` | move the cursor (scrolls the view at the edge) |
+| `0` / `$` / Home / End | start / end of line |
+| `g` / `G` | oldest line / live view |
+| PgUp `b` / PgDn `f` / Ctrl-u / Ctrl-d | page / half-page |
+| `Space` or `v` | start or clear a selection |
+| `y` or Enter | copy (selection, or the cursor line) and leave |
+| `q` or Esc | leave |
+
+A copy goes to the Windows clipboard and to an internal buffer that `Ctrl-b ]`
+pastes. Paste from another program uses the terminal's own paste (bracketed
+paste is passed through).
 
 ## Layout
 
@@ -66,9 +85,10 @@ The session ends when its last shell exits.
 | `src/layout.rs` | binary split tree, rectangle math |
 | `src/keys.rs` | key events -> VT input bytes |
 | `src/render.rs` | cell grid, per-client diff against the last frame |
+| `src/clip.rs` | write text to the Windows clipboard (CF_UNICODETEXT) |
 | `examples/drive.rs` | end-to-end test: runs clients in pseudo consoles, types keys, checks screens |
 
 ## Not built yet
 
-- Mouse support, copy/paste in scroll mode, config file.
+- Mouse support, config file.
 - Choose-tree / switch session from inside (`Ctrl-b s`).
