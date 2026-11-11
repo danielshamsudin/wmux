@@ -17,7 +17,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use uds_windows::{UnixListener, UnixStream};
 
 use crate::config::{self, Action, Config, Key};
@@ -58,6 +58,8 @@ enum Mode {
     Scroll(Copy),
     /// Type a new window name.
     Rename(String),
+    /// Pick another session to attach to (Ctrl-b s).
+    Choose { names: Vec<String>, sel: usize },
 }
 
 /// Copy-mode cursor and selection. `line` is an absolute line number counted
@@ -278,6 +280,9 @@ impl App {
                 self.latest = Some(id);
                 self.set_size(size);
                 self.dirty = true;
+                if self.cfg.mouse {
+                    self.reply(id, proto::MOUSEON, &[1]);
+                }
             }
             proto::RESIZE => {
                 let Some(size) = proto::parse_size(&p) else { return };
@@ -309,6 +314,20 @@ impl App {
                     self.send_active(format!("\x1b[200~{s}\x1b[201~").as_bytes());
                 } else {
                     self.send_active(s.as_bytes());
+                }
+            }
+            proto::MOUSE => {
+                let c = &self.clients[&id];
+                if !c.attached {
+                    return;
+                }
+                if self.latest != Some(id) {
+                    let size = c.size;
+                    self.latest = Some(id);
+                    self.set_size(size);
+                }
+                if let Some(m) = proto::parse_mouse(&p) {
+                    self.mouse(m);
                 }
             }
             proto::LIST => self.reply(id, proto::TEXT, self.summary().as_bytes()),
@@ -547,6 +566,7 @@ impl App {
                 }
             }
             Mode::Scroll(st) => self.scroll_key(k, st),
+            Mode::Choose { names, sel } => self.choose_key(k, names, sel),
             Mode::Rename(mut buf) => {
                 match k.code {
                     KeyCode::Enter => {
@@ -664,6 +684,7 @@ impl App {
                     self.close_client(id, &reason);
                 }
             }
+            Action::ChooseSession => self.enter_choose(),
             Action::Help => self.msg(
                 "% \" split | arrows move | C-arrows resize | o ; pane | x kill | z zoom | c n p l 0-9 window | & kill win | [ copy | ] paste | , rename | d detach",
             ),
@@ -792,6 +813,149 @@ impl App {
         }
         p.screen_mut().set_scrollback(saved);
         out
+    }
+
+    // ---- choose session (Ctrl-b s) -------------------------------------
+
+    fn enter_choose(&mut self) {
+        let names = session::sessions();
+        if names.len() <= 1 {
+            self.msg("no other session");
+            return;
+        }
+        let sel = names.iter().position(|n| *n == self.name).unwrap_or(0);
+        self.mode = Mode::Choose { names, sel };
+        self.dirty = true;
+    }
+
+    fn choose_key(&mut self, k: KeyEvent, names: Vec<String>, mut sel: usize) {
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(names.len() - 1),
+            KeyCode::Home | KeyCode::Char('g') => sel = 0,
+            KeyCode::End | KeyCode::Char('G') => sel = names.len() - 1,
+            KeyCode::Char(c @ '0'..='9') => {
+                let i = c as usize - '0' as usize;
+                if i < names.len() {
+                    sel = i;
+                }
+            }
+            KeyCode::Enter => {
+                let target = names[sel].clone();
+                self.mode = Mode::Normal;
+                self.dirty = true;
+                // Tell the client to re-attach, then drop the connection.
+                if target != self.name
+                    && let Some(id) = self.cur_client
+                {
+                    self.reply(id, proto::SWITCH, target.as_bytes());
+                    self.client_gone(id);
+                }
+                return;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+                self.dirty = true;
+                return;
+            }
+            _ => {}
+        }
+        self.mode = Mode::Choose { names, sel };
+        self.dirty = true;
+    }
+
+    // ---- mouse ---------------------------------------------------------
+
+    fn pane_under(&self, x: u16, y: u16) -> Option<usize> {
+        let (p, _) = self.window_layout(self.win());
+        p.iter().find(|(_, r)| r.contains(x, y)).map(|x| x.0)
+    }
+
+    fn active_rect(&self) -> Option<Rect> {
+        let (p, _) = self.window_layout(self.win());
+        let active = self.win().active;
+        p.iter().find(|(i, _)| *i == active).map(|x| x.1)
+    }
+
+    /// Map a screen cell to an (absolute line, column) in the active pane.
+    fn cell_to_copy(&self, col: u16, row: u16) -> Option<(usize, u16)> {
+        let rect = self.active_rect()?;
+        if !rect.contains(col, row) {
+            return None;
+        }
+        let pane = self.active_pane()?;
+        let sb = pane.parser.lock().unwrap().screen().scrollback_len();
+        Some(((sb - pane.scroll) + (row - rect.y) as usize, col - rect.x))
+    }
+
+    fn mouse(&mut self, m: MouseEvent) {
+        let (col, row) = (m.column, m.row);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Mode::Scroll(mut st) = self.mode {
+                    if let Some((line, c)) = self.cell_to_copy(col, row) {
+                        st.line = line;
+                        st.col = c;
+                        st.anchor = Some((line, c));
+                        self.mode = Mode::Scroll(st);
+                        self.dirty = true;
+                    }
+                } else if let Some(id) = self.pane_under(col, row) {
+                    self.focus(id);
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Mode::Scroll(mut st) = self.mode
+                    && let Some((line, c)) = self.cell_to_copy(col, row)
+                {
+                    if st.anchor.is_none() {
+                        st.anchor = Some((st.line, st.col));
+                    }
+                    st.line = line;
+                    st.col = c;
+                    self.mode = Mode::Scroll(st);
+                    self.dirty = true;
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Mode::Scroll(st) = self.mode
+                    && st.anchor.is_some()
+                    && st.anchor != Some((st.line, st.col))
+                {
+                    let text = self.copy_text(&st);
+                    let n = text.chars().count();
+                    self.copy_buf = text.clone();
+                    let ok = crate::clip::set(&text);
+                    self.msg(format!("copied {n} chars{}", if ok { "" } else { " (clipboard busy)" }));
+                    self.mode = Mode::Normal;
+                    self.set_scroll(0);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if let Some(id) = self.pane_under(col, row) {
+                    self.focus(id);
+                }
+                if !matches!(self.mode, Mode::Scroll(_)) {
+                    self.enter_copy();
+                }
+                self.wheel(KeyCode::Up);
+            }
+            MouseEventKind::ScrollDown => {
+                if matches!(self.mode, Mode::Scroll(_)) {
+                    self.wheel(KeyCode::Down);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Move the copy cursor a few lines, as a wheel notch does.
+    fn wheel(&mut self, code: KeyCode) {
+        for _ in 0..3 {
+            if let Mode::Scroll(st) = self.mode {
+                self.scroll_key(KeyEvent::new(code, KeyModifiers::NONE), st);
+            }
+        }
     }
 
     // ---- drawing -------------------------------------------------------
@@ -951,6 +1115,7 @@ impl App {
                 let s = if st.anchor.is_some() { "[copy  y:copy  q:exit] " } else { "[copy  v:select  q:exit] " };
                 grid.text(0, y, s, hi)
             }
+            Mode::Choose { .. } => grid.text(0, y, "[choose  enter:pick  q:exit] ", hi),
             _ => grid.text(0, y, &format!("[{}] ", self.name), bar),
         };
         if let Some((m, t)) = &self.message {
@@ -980,6 +1145,27 @@ impl App {
         let cx = self.w.saturating_sub(clock.len() as u16);
         if cx > x {
             grid.text(cx, y, &clock, bar);
+        }
+
+        // Session chooser overlay, drawn over the body.
+        if let Mode::Choose { names, sel } = &self.mode {
+            let title = "(choose-session)";
+            let box_w = names.iter().map(|n| n.chars().count()).max().unwrap_or(0).max(title.len()) as u16 + 3;
+            let norm = Style { fg: Color::Idx(self.cfg.status_fg), bg: Color::Idx(self.cfg.status_bg), attrs: 0 };
+            let selbg = Style { fg: Color::Idx(self.cfg.message_fg), bg: Color::Idx(self.cfg.message_bg), attrs: 0 };
+            let pad = |s: String, w: u16| {
+                let mut s = s;
+                while (s.chars().count() as u16) < w {
+                    s.push(' ');
+                }
+                s
+            };
+            grid.text(2, 1, &pad(format!(" {title}"), box_w), norm);
+            for (i, n) in names.iter().enumerate() {
+                let marker = if *n == self.name { '*' } else { ' ' };
+                let st = if i == *sel { selbg } else { norm };
+                grid.text(2, 2 + i as u16, &pad(format!(" {marker}{n}"), box_w), st);
+            }
         }
 
         let (cursor, shape) = match self.mode {

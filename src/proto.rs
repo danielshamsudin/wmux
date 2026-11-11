@@ -4,7 +4,9 @@
 
 use std::io::{self, Read, Write};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 // client -> server
 pub const HELLO: u8 = 1; // attach; payload = size
@@ -13,11 +15,14 @@ pub const RESIZE: u8 = 3; // payload = size
 pub const PASTE: u8 = 4; // payload = utf-8 text
 pub const LIST: u8 = 5; // ask for a one-line session summary
 pub const KILL: u8 = 6; // stop the session
+pub const MOUSE: u8 = 7; // payload = mouse event
 
 // server -> client
 pub const FRAME: u8 = 101; // raw VT bytes to write to the terminal
 pub const EXIT: u8 = 102; // payload = reason, e.g. "[detached (from session 0)]"
 pub const TEXT: u8 = 103; // reply to LIST / KILL
+pub const MOUSEON: u8 = 104; // payload = [1] enable mouse capture, [0] disable
+pub const SWITCH: u8 = 105; // payload = session name to re-attach to
 
 const MAX_LEN: usize = 64 << 20;
 
@@ -126,6 +131,58 @@ pub fn parse_key(p: &[u8]) -> Option<KeyEvent> {
     Some(KeyEvent::new_with_kind(code, KeyModifiers::from_bits_truncate(p[5]), kind))
 }
 
+/// Mouse layout: [kind u8][button u8][col u16][row u16][modifier bits u8]
+pub fn mouse(m: &MouseEvent) -> Vec<u8> {
+    let button = |b: MouseButton| match b {
+        MouseButton::Left => 0u8,
+        MouseButton::Right => 1,
+        MouseButton::Middle => 2,
+    };
+    let (kind, btn) = match m.kind {
+        MouseEventKind::Down(b) => (0u8, button(b)),
+        MouseEventKind::Up(b) => (1, button(b)),
+        MouseEventKind::Drag(b) => (2, button(b)),
+        MouseEventKind::Moved => (3, 255),
+        MouseEventKind::ScrollDown => (4, 255),
+        MouseEventKind::ScrollUp => (5, 255),
+        MouseEventKind::ScrollLeft => (6, 255),
+        MouseEventKind::ScrollRight => (7, 255),
+    };
+    let mut v = vec![kind, btn];
+    v.extend(m.column.to_le_bytes());
+    v.extend(m.row.to_le_bytes());
+    v.push(m.modifiers.bits());
+    v
+}
+
+pub fn parse_mouse(p: &[u8]) -> Option<MouseEvent> {
+    if p.len() != 7 {
+        return None;
+    }
+    let button = |b: u8| match b {
+        0 => Some(MouseButton::Left),
+        1 => Some(MouseButton::Right),
+        _ => Some(MouseButton::Middle),
+    };
+    let kind = match p[0] {
+        0 => MouseEventKind::Down(button(p[1])?),
+        1 => MouseEventKind::Up(button(p[1])?),
+        2 => MouseEventKind::Drag(button(p[1])?),
+        3 => MouseEventKind::Moved,
+        4 => MouseEventKind::ScrollDown,
+        5 => MouseEventKind::ScrollUp,
+        6 => MouseEventKind::ScrollLeft,
+        7 => MouseEventKind::ScrollRight,
+        _ => return None,
+    };
+    Some(MouseEvent {
+        kind,
+        column: u16::from_le_bytes([p[2], p[3]]),
+        row: u16::from_le_bytes([p[4], p[5]]),
+        modifiers: KeyModifiers::from_bits_truncate(p[6]),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +197,13 @@ mod tests {
         send(&mut buf, FRAME, b"hello").unwrap();
         assert_eq!(recv(&mut &buf[..]).unwrap(), (FRAME, b"hello".to_vec()));
         assert_eq!(parse_size(&size(120, 40)), Some((120, 40)));
+
+        let m = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 12,
+            row: 7,
+            modifiers: KeyModifiers::SHIFT,
+        };
+        assert_eq!(parse_mouse(&mouse(&m)), Some(m));
     }
 }

@@ -45,6 +45,7 @@ pub enum Action {
     Paste,
     RenameWindow,
     Detach,
+    ChooseSession,
     Help,
 }
 
@@ -74,6 +75,7 @@ pub struct Config {
     pub status_bg: u8,
     pub message_fg: u8,
     pub message_bg: u8,
+    pub mouse: bool,
     pub binds: HashMap<Key, Action>,
     /// Problems found while parsing, "line N: ...", for the status bar.
     pub errors: Vec<String>,
@@ -102,6 +104,7 @@ fn default_binds() -> HashMap<Key, Action> {
     add(']', Action::Paste);
     add(',', Action::RenameWindow);
     add('d', Action::Detach);
+    add('s', Action::ChooseSession);
     add('?', Action::Help);
     for d in 0..=9u8 {
         b.insert((n, KeyCode::Char((b'0' + d) as char)), Action::SelectWindow(d));
@@ -121,6 +124,7 @@ impl Default for Config {
             status_bg: 2,
             message_fg: 0,
             message_bg: 3,
+            mouse: false,
             binds: default_binds(),
             errors: Vec::new(),
         }
@@ -273,6 +277,7 @@ fn parse_action(tok: &[String]) -> Option<Action> {
         "paste" | "paste-buffer" => Action::Paste,
         "rename-window" | "rename" => Action::RenameWindow,
         "detach" | "detach-client" => Action::Detach,
+        "choose-session" | "choose-tree" | "choose" => Action::ChooseSession,
         "list-keys" | "help" => Action::Help,
         _ => return None,
     })
@@ -326,6 +331,13 @@ impl Config {
                     "status-bg" => self.status_bg = parse_color(val).ok_or_else(|| format!("bad colour: {val}"))?,
                     "message-fg" => self.message_fg = parse_color(val).ok_or_else(|| format!("bad colour: {val}"))?,
                     "message-bg" => self.message_bg = parse_color(val).ok_or_else(|| format!("bad colour: {val}"))?,
+                    "mouse" => {
+                        self.mouse = match val {
+                            "on" | "1" | "true" | "yes" => true,
+                            "off" | "0" | "false" | "no" => false,
+                            _ => return Err(format!("mouse wants on/off: {val}")),
+                        }
+                    }
                     _ => return Err(format!("unknown option: {name}")),
                 }
             }

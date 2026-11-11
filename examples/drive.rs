@@ -87,6 +87,7 @@ impl Term {
         for r in self.rows() {
             println!("|{}", r.trim_end());
         }
+        let _ = std::io::stdout().flush();
     }
 
     fn contains(&self, s: &str) -> bool {
@@ -99,8 +100,23 @@ fn wmux(args: &[&str]) -> String {
     format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
 }
 
+/// Run a wmux command with no captured pipes. Use this to start a detached
+/// session: the background server inherits the spawner's handles, so a
+/// captured stdout pipe (as `wmux` uses) would stay open and never give EOF.
+fn wmux_bg(args: &[&str]) {
+    use std::process::Stdio;
+    let _ = Command::new(exe())
+        .args(args)
+        .env_remove("WMUX")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 fn check(ok: bool, what: &str) {
     println!("[{}] {what}", if ok { "PASS" } else { "FAIL" });
+    let _ = std::io::stdout().flush();
 }
 
 fn main() {
@@ -185,6 +201,50 @@ fn main() {
     check(!g.rows()[19].contains("2:"), "old prefix Ctrl-b no longer makes a window");
     let _ = wmux(&["kill-session", "-t", "drvcfg"]);
     let _ = std::fs::remove_file(&cfg_path);
+
+    // 6d. Mouse: click a pane to focus it. We inject SGR mouse sequences; the
+    // client parses and forwards them, so no `set mouse on` is needed here.
+    let _ = wmux(&["kill-session", "-t", "drvm"]);
+    let m = Term::open(80, 20, &["new", "-s", "drvm", "cmd.exe"]);
+    sleep(Duration::from_millis(2000));
+    m.send(b"\x02%", 1200); // split left/right; the right pane is active
+    m.send(b"echo RSIDE\r", 700); // goes to the right pane
+    m.send(b"\x1b[<0;5;5M", 300); // left-button press at col 5, row 5 (left pane)
+    m.send(b"\x1b[<0;5;5m", 500); // release
+    m.send(b"echo LSIDE\r", 700); // should now go to the left pane
+    m.show("M: after clicking the left pane");
+    let rows = m.rows();
+    let half = |r: &str, left: bool| -> String {
+        let c: Vec<char> = r.chars().collect();
+        if left { c.iter().take(39).collect() } else { c.iter().skip(41).collect() }
+    };
+    let left_has = |s: &str| rows.iter().any(|r| half(r, true).contains(s));
+    let right_has = |s: &str| rows.iter().any(|r| half(r, false).contains(s));
+    check(left_has("LSIDE") && right_has("RSIDE"), "mouse click moved focus to the clicked pane");
+    let _ = wmux(&["kill-session", "-t", "drvm"]);
+
+    // 6e. Choose session (Ctrl-b s): switch the client from one session to another.
+    let _ = wmux(&["kill-server"]);
+    wmux_bg(&["new", "-s", "sA", "-d", "cmd.exe"]);
+    wmux_bg(&["new", "-s", "sB", "-d", "cmd.exe"]);
+    sleep(Duration::from_millis(2500));
+    let s = Term::open(90, 20, &["attach", "-t", "sA"]);
+    sleep(Duration::from_millis(1500));
+    s.send(b"echo IN_SA\r", 700);
+    s.show("S: attached to sA");
+    check(s.contains("IN_SA") && s.rows()[19].contains("[sA]"), "attached to sA");
+    s.send(b"\x02s", 800); // Ctrl-b s : open the session chooser
+    s.show("S: session chooser");
+    check(s.contains("choose-session"), "Ctrl-b s opened the chooser");
+    s.send(b"\x1b[B", 500); // down to sB (sA is first, oldest)
+    s.send(b"\r", 1800); // Enter : the client re-attaches to sB
+    s.send(b"echo IN_SB\r", 900);
+    s.show("S: switched to sB");
+    check(
+        s.rows()[19].contains("[sB]") && s.contains("IN_SB") && !s.contains("IN_SA"),
+        "Ctrl-b s switched the client to sB",
+    );
+    let _ = wmux(&["kill-server"]);
 
     // 7. Default shell (pwsh / powershell with PSReadLine), with a split.
     let p = Term::open(100, 24, &["new", "-s", "drvps"]);

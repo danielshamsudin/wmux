@@ -35,6 +35,7 @@ set status-bg 4             # status bar colours: 0-255, colourN, or a name
 set status-fg 7
 set message-fg 7
 set message-bg 1
+set mouse on                # click panes, wheel-scroll, drag-select (default off)
 bind | split-window -h      # rebind a prefix key to an action
 bind _ split-window -v
 unbind '"'
@@ -44,8 +45,8 @@ A leading `-g` is ignored, so lines copied from a `.tmux.conf` mostly work.
 Bindable actions: `split-window -h|-v` (or `split-h`/`split-v`), `next-pane`,
 `last-pane`, `kill-pane`, `kill-window`, `new-window`, `next-window`,
 `previous-window`, `last-window`, `select-window N`, `zoom`, `copy-mode`,
-`paste`, `rename-window`, `detach`, `list-keys`. A bad line is skipped and
-reported in the status bar; the rest of the file still applies.
+`paste`, `rename-window`, `detach`, `choose-session`, `list-keys`. A bad line
+is skipped and reported in the status bar; the rest of the file still applies.
 
 ## How sessions work
 
@@ -73,11 +74,23 @@ size of the client that typed last (tmux `window-size latest`).
 | `&` | kill window |
 | `[` or PgUp | copy mode (see below) |
 | `]` | paste the last copied text |
+| `s` | choose another session to attach to |
 | Ctrl-b | send a literal Ctrl-b |
 | `d` | detach |
 | `?` | key help in the status bar |
 
 The session ends when its last shell exits.
+
+### Mouse (`set mouse on`)
+
+Off by default, so the terminal's own selection keeps working. With it on:
+click a pane to focus it, wheel up to enter copy mode and scroll, and drag to
+select then release to copy.
+
+### Choose a session (`Ctrl-b s`)
+
+Lists the live sessions; arrows or `j`/`k` move, Enter attaches the client to
+the chosen one, `q`/Esc cancels. The session you leave keeps running.
 
 ### Copy mode (`Ctrl-b [`)
 
@@ -104,8 +117,8 @@ paste is passed through).
 | `src/main.rs` | CLI: new, attach, ls, kill-session, kill-server |
 | `src/session.rs` | socket paths, session list, stale socket cleanup, start server |
 | `src/proto.rs` | wire format `[tag][len][payload]`, key serialization |
-| `src/client.rs` | raw mode; keys -> socket; frames -> stdout |
-| `src/server.rs` | event loop, prefix state machine, windows, borders, status bar, clients |
+| `src/client.rs` | raw mode; keys/mouse -> socket; frames -> stdout; reconnect loop for session switching |
+| `src/server.rs` | event loop, prefix state machine, windows, borders, status bar, clients, copy mode, mouse, chooser |
 | `src/conpty.rs` | ConPTY: pipes, CreatePseudoConsole (flags 0), CreateProcessW |
 | `src/pane.rs` | one shell: ConPTY + vt100 emulator + reader/waiter threads, answers DSR/DA |
 | `src/layout.rs` | binary split tree, rectangle math |
@@ -117,5 +130,6 @@ paste is passed through).
 
 ## Not built yet
 
-- Mouse support.
-- Choose-tree / switch session from inside (`Ctrl-b s`).
+- Copy-mode block selection, searching the scrollback.
+- Resizing panes or switching the active pane by mouse drag.
+- Session persistence across a reboot.
