@@ -21,6 +21,32 @@ Set `WMUX_SHELL` to change the default shell (default: pwsh, else powershell, el
 Set `WMUX_LOG=<file>` for a debug trace from client and server.
 Run `wmux kill-server` before you rebuild: a running server locks `wmux.exe`.
 
+## Config file
+
+wmux reads a tmux.conf-style file at `%WMUX_CONFIG%`, else `%USERPROFILE%\.wmux.conf`,
+once when a session's server starts. One command per line; `#` starts a comment.
+
+```
+set prefix C-a              # prefix key (default C-b); C-a, M-x, a bare char
+set repeat-time 300         # ms an arrow repeat stays live after the prefix
+set history-limit 50000     # scrollback lines per pane
+set default-shell pwsh -NoLogo
+set status-bg 4             # status bar colours: 0-255, colourN, or a name
+set status-fg 7
+set message-fg 7
+set message-bg 1
+bind | split-window -h      # rebind a prefix key to an action
+bind _ split-window -v
+unbind '"'
+```
+
+A leading `-g` is ignored, so lines copied from a `.tmux.conf` mostly work.
+Bindable actions: `split-window -h|-v` (or `split-h`/`split-v`), `next-pane`,
+`last-pane`, `kill-pane`, `kill-window`, `new-window`, `next-window`,
+`previous-window`, `last-window`, `select-window N`, `zoom`, `copy-mode`,
+`paste`, `rename-window`, `detach`, `list-keys`. A bad line is skipped and
+reported in the status bar; the rest of the file still applies.
+
 ## How sessions work
 
 `wmux new` starts `wmux __server <name>` as a background process with no console
@@ -86,9 +112,10 @@ paste is passed through).
 | `src/keys.rs` | key events -> VT input bytes |
 | `src/render.rs` | cell grid, per-client diff against the last frame |
 | `src/clip.rs` | write text to the Windows clipboard (CF_UNICODETEXT) |
+| `src/config.rs` | parse `~/.wmux.conf`: prefix, options, colours, key bindings |
 | `examples/drive.rs` | end-to-end test: runs clients in pseudo consoles, types keys, checks screens |
 
 ## Not built yet
 
-- Mouse support, config file.
+- Mouse support.
 - Choose-tree / switch session from inside (`Ctrl-b s`).

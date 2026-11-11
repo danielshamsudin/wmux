@@ -25,6 +25,10 @@ struct Term {
 
 impl Term {
     fn open(cols: u16, rows: u16, args: &[&str]) -> Term {
+        Term::open_env(cols, rows, args, &[])
+    }
+
+    fn open_env(cols: u16, rows: u16, args: &[&str], env: &[(&str, &str)]) -> Term {
         let pair = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .unwrap();
@@ -32,6 +36,9 @@ impl Term {
         cmd.args(args);
         cmd.cwd(std::env::current_dir().unwrap());
         cmd.env_remove("WMUX");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
         let child = pair.slave.spawn_command(cmd).unwrap();
         let mut reader = pair.master.try_clone_reader().unwrap();
         let writer = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
@@ -161,6 +168,23 @@ fn main() {
     c.show("C: after paste and run");
     check(c.contains("PFX_UNIQ_ABC"), "Ctrl-b ] pasted the copied text and it ran");
     let _ = wmux(&["kill-session", "-t", "drvc"]);
+
+    // 6c. Config file: remap the prefix to Ctrl-a, then prove it works and that
+    // the old Ctrl-b prefix is now inert.
+    let _ = wmux(&["kill-session", "-t", "drvcfg"]);
+    let cfg_path = std::env::temp_dir().join("wmux_drive.conf");
+    std::fs::write(&cfg_path, "set prefix C-a\nset history-limit 500\n").unwrap();
+    let cfg_env = [("WMUX_CONFIG", cfg_path.to_str().unwrap())];
+    let g = Term::open_env(80, 20, &["new", "-s", "drvcfg", "cmd.exe"], &cfg_env);
+    sleep(Duration::from_millis(2000));
+    g.send(b"\x01c", 1500); // Ctrl-a c : with the remap, this makes a 2nd window
+    g.show("G: after Ctrl-a c (remapped prefix)");
+    check(g.rows()[19].contains("1:"), "remapped prefix Ctrl-a c created a 2nd window");
+    g.send(b"\x02c", 1500); // Ctrl-b c : old prefix, now inert -> no 3rd window
+    g.show("G: after Ctrl-b c (old prefix, inert)");
+    check(!g.rows()[19].contains("2:"), "old prefix Ctrl-b no longer makes a window");
+    let _ = wmux(&["kill-session", "-t", "drvcfg"]);
+    let _ = std::fs::remove_file(&cfg_path);
 
     // 7. Default shell (pwsh / powershell with PSReadLine), with a split.
     let p = Term::open(100, 24, &["new", "-s", "drvps"]);

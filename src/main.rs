@@ -21,6 +21,7 @@ macro_rules! log {
 
 mod clip;
 mod client;
+mod config;
 mod conpty;
 mod keys;
 mod layout;
@@ -55,6 +56,9 @@ fn default_shell() -> Vec<String> {
         if !v.is_empty() {
             return v;
         }
+    }
+    if let Some(sh) = config::load().default_shell {
+        return sh;
     }
     for exe in ["pwsh.exe", "powershell.exe"] {
         if on_path(exe) {

@@ -20,6 +20,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use uds_windows::{UnixListener, UnixStream};
 
+use crate::config::{self, Action, Config, Key};
 use crate::keys;
 use crate::layout::{self, Axis, Node, Rect};
 use crate::pane::Pane;
@@ -135,17 +136,13 @@ struct App {
     cur_client: Option<usize>,
     tx: Sender<Event>,
     cmd: Vec<String>,
+    cfg: Config,
     /// The last text yanked in copy mode. Ctrl-b ] pastes it.
     copy_buf: String,
     message: Option<(String, Instant)>,
     dirty: bool,
     /// Set when the server must stop. The text goes to attached clients.
     quit: Option<String>,
-}
-
-fn is_prefix(k: &KeyEvent) -> bool {
-    k.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(k.code, KeyCode::Char('b') | KeyCode::Char('B') | KeyCode::Char('\x02'))
 }
 
 fn arrow(k: &KeyEvent) -> Option<Dir> {
@@ -159,6 +156,19 @@ fn arrow(k: &KeyEvent) -> Option<Dir> {
 }
 
 impl App {
+    /// Is this key the configured prefix? Accepts both the Ctrl+letter form the
+    /// terminal usually sends and the raw control byte some terminals send.
+    fn is_prefix(&self, k: &KeyEvent) -> bool {
+        let (pm, pc) = self.cfg.prefix;
+        if config::norm_key(k.modifiers, k.code) == (pm, pc) {
+            return true;
+        }
+        if let (Some(b), KeyCode::Char(c)) = (self.cfg.prefix_byte, k.code) {
+            return (c as u32) == b as u32 && (c as u32) < 0x20;
+        }
+        false
+    }
+
     fn area(&self) -> Rect {
         Rect { x: 0, y: 0, w: self.w, h: self.h.saturating_sub(1) } // last row = status bar
     }
@@ -314,7 +324,7 @@ impl App {
 
     fn new_window(&mut self) -> Result<()> {
         let id = self.alloc_id();
-        let pane = Pane::spawn(id, &self.cmd, self.area(), self.tx.clone())?;
+        let pane = Pane::spawn(id, &self.cmd, self.area(), self.cfg.history, self.tx.clone())?;
         self.panes.insert(id, pane);
         let name = std::path::Path::new(&self.cmd[0])
             .file_stem()
@@ -387,7 +397,7 @@ impl App {
         let result = if rect.w < 2 || rect.h < 2 {
             Err(anyhow::anyhow!("pane too small"))
         } else {
-            Pane::spawn(id, &self.cmd, rect, self.tx.clone())
+            Pane::spawn(id, &self.cmd, rect, self.cfg.history, self.tx.clone())
         };
         match result {
             Ok(pane) => {
@@ -525,13 +535,13 @@ impl App {
             Mode::Prefix => {
                 self.dirty = true;
                 if self.prefix_cmd(k) {
-                    self.mode = Mode::Repeat(Instant::now() + Duration::from_millis(500));
+                    self.mode = Mode::Repeat(Instant::now() + Duration::from_millis(self.cfg.repeat_ms));
                 }
             }
             Mode::Repeat(until) => {
                 if Instant::now() < until && arrow(&k).is_some() {
                     self.prefix_cmd(k);
-                    self.mode = Mode::Repeat(Instant::now() + Duration::from_millis(500));
+                    self.mode = Mode::Repeat(Instant::now() + Duration::from_millis(self.cfg.repeat_ms));
                 } else {
                     self.normal_key(k);
                 }
@@ -559,7 +569,7 @@ impl App {
     }
 
     fn normal_key(&mut self, k: KeyEvent) {
-        if is_prefix(&k) {
+        if self.is_prefix(&k) {
             self.mode = Mode::Prefix;
             self.dirty = true;
             return;
@@ -572,55 +582,71 @@ impl App {
 
     /// Run one prefix command. Returns true if the command can repeat.
     fn prefix_cmd(&mut self, k: KeyEvent) -> bool {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        if is_prefix(&k) {
-            self.send_active(&[0x02]); // Ctrl-b Ctrl-b sends a real Ctrl-b
+        if self.is_prefix(&k) {
+            if let Some(b) = self.cfg.prefix_byte {
+                self.send_active(&[b]); // prefix twice sends a real prefix key
+            }
             return false;
         }
+        // Arrows move/resize the pane and may repeat; they are not rebindable.
         if let Some(d) = arrow(&k) {
-            if ctrl { self.resize_pane(d) } else { self.select_dir(d) }
+            if k.modifiers.contains(KeyModifiers::CONTROL) {
+                self.resize_pane(d)
+            } else {
+                self.select_dir(d)
+            }
             return true;
         }
-        match k.code {
-            KeyCode::Char('%') | KeyCode::Char('|') => self.split(Axis::Horizontal),
-            KeyCode::Char('"') | KeyCode::Char('-') => self.split(Axis::Vertical),
-            KeyCode::Char('o') => self.cycle_pane(),
-            KeyCode::Char(';') => {
+        if matches!(k.code, KeyCode::PageUp) {
+            self.enter_copy();
+            if let Mode::Scroll(st) = self.mode {
+                self.scroll_key(k, st);
+            }
+            return false;
+        }
+        let key: Key = config::norm_key(k.modifiers, k.code);
+        if let Some(&action) = self.cfg.binds.get(&key) {
+            self.run_action(action);
+        }
+        false
+    }
+
+    /// Carry out a bound prefix command.
+    fn run_action(&mut self, a: Action) {
+        match a {
+            Action::SplitH => self.split(Axis::Horizontal),
+            Action::SplitV => self.split(Axis::Vertical),
+            Action::NextPane => self.cycle_pane(),
+            Action::LastPane => {
                 if let Some(l) = self.win().last {
                     self.focus(l);
                 }
             }
-            KeyCode::Char('x') => {
+            Action::KillPane => {
                 let id = self.win().active;
                 self.remove_pane(id);
             }
-            KeyCode::Char('&') => self.kill_window(),
-            KeyCode::Char('c') => {
+            Action::KillWindow => self.kill_window(),
+            Action::NewWindow => {
                 if let Err(e) = self.new_window() {
                     self.msg(format!("new window failed: {e}"));
                 }
             }
-            KeyCode::Char('n') => self.select_window((self.active + 1) % self.windows.len()),
-            KeyCode::Char('p') => self.select_window((self.active + self.windows.len() - 1) % self.windows.len()),
-            KeyCode::Char('l') => {
+            Action::NextWindow => self.select_window((self.active + 1) % self.windows.len()),
+            Action::PrevWindow => self.select_window((self.active + self.windows.len() - 1) % self.windows.len()),
+            Action::LastWindow => {
                 if let Some(l) = self.last_window {
                     self.select_window(l);
                 }
             }
-            KeyCode::Char(c @ '0'..='9') => self.select_window(c as usize - '0' as usize),
-            KeyCode::Char('z') => {
+            Action::SelectWindow(n) => self.select_window(n as usize),
+            Action::Zoom => {
                 let w = self.win_mut();
                 w.zoomed = !w.zoomed;
                 self.apply_layout();
             }
-            KeyCode::Char('[') => self.enter_copy(),
-            KeyCode::PageUp => {
-                self.enter_copy();
-                if let Mode::Scroll(st) = self.mode {
-                    self.scroll_key(k, st);
-                }
-            }
-            KeyCode::Char(']') => {
+            Action::CopyMode => self.enter_copy(),
+            Action::Paste => {
                 if !self.copy_buf.is_empty() {
                     let s = self.copy_buf.clone();
                     let bracketed = self.active_pane().is_some_and(|p| p.parser.lock().unwrap().screen().bracketed_paste());
@@ -631,19 +657,17 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char(',') => self.mode = Mode::Rename(String::new()),
-            KeyCode::Char('d') => {
+            Action::RenameWindow => self.mode = Mode::Rename(String::new()),
+            Action::Detach => {
                 if let Some(id) = self.cur_client {
                     let reason = format!("[detached (from session {})]", self.name);
                     self.close_client(id, &reason);
                 }
             }
-            KeyCode::Char('?') => self.msg(
+            Action::Help => self.msg(
                 "% \" split | arrows move | C-arrows resize | o ; pane | x kill | z zoom | c n p l 0-9 window | & kill win | [ copy | ] paste | , rename | d detach",
             ),
-            _ => {}
         }
-        false
     }
 
     /// Enter copy mode: live view, cursor on the shell's cursor, no selection.
@@ -911,13 +935,18 @@ impl App {
 
         // Status bar, tmux style.
         let y = self.h.saturating_sub(1);
-        let bar = Style { fg: Color::Idx(0), bg: Color::Idx(2), attrs: 0 };
-        let hi = Style { fg: Color::Idx(0), bg: Color::Idx(3), attrs: 0 };
+        let bar = Style { fg: Color::Idx(self.cfg.status_fg), bg: Color::Idx(self.cfg.status_bg), attrs: 0 };
+        let hi = Style { fg: Color::Idx(self.cfg.message_fg), bg: Color::Idx(self.cfg.message_bg), attrs: 0 };
         for x in 0..self.w {
             grid.set(x, y, " ", bar, false);
         }
+        let plabel = match self.cfg.prefix {
+            (m, KeyCode::Char(c)) if m.contains(KeyModifiers::CONTROL) => format!("^{}", c.to_ascii_uppercase()),
+            (_, KeyCode::Char(c)) => c.to_string(),
+            _ => "prefix".to_string(),
+        };
         let mut x = match self.mode {
-            Mode::Prefix | Mode::Repeat(_) => grid.text(0, y, "[^B] ", hi),
+            Mode::Prefix | Mode::Repeat(_) => grid.text(0, y, &format!("[{plabel}] "), hi),
             Mode::Scroll(st) => {
                 let s = if st.anchor.is_some() { "[copy  y:copy  q:exit] " } else { "[copy  v:select  q:exit] " };
                 grid.text(0, y, s, hi)
@@ -999,6 +1028,11 @@ pub fn run(name: String, w: u16, h: u16, cmd: Vec<String>) -> Result<()> {
         });
     }
 
+    let cfg = config::load();
+    for e in &cfg.errors {
+        log!("config {e}");
+    }
+    let config_error = cfg.errors.first().cloned();
     let mut app = App {
         name,
         created: chrono::Local::now(),
@@ -1016,11 +1050,15 @@ pub fn run(name: String, w: u16, h: u16, cmd: Vec<String>) -> Result<()> {
         cur_client: None,
         tx,
         cmd,
+        cfg,
         copy_buf: String::new(),
         message: None,
         dirty: true,
         quit: None,
     };
+    if let Some(e) = config_error {
+        app.msg(format!("config {e}"));
+    }
     if let Err(e) = app.new_window() {
         log!("first window failed: {e}");
         let _ = std::fs::remove_file(&path);

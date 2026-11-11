@@ -61,21 +61,19 @@ pub struct Pane {
     pub scroll: usize,
 }
 
-const SCROLLBACK: usize = 10_000;
-
 fn nz(v: u16) -> NonZeroU16 {
     NonZeroU16::new(v.max(1)).unwrap()
 }
 
 impl Pane {
-    pub fn spawn(id: usize, cmd: &[String], rect: Rect, tx: Sender<Event>) -> Result<Pane> {
+    pub fn spawn(id: usize, cmd: &[String], rect: Rect, history: usize, tx: Sender<Event>) -> Result<Pane> {
         let conpty::Spawned { console, process, mut reader, writer } = conpty::spawn(cmd, rect.w, rect.h)?;
         let process = Arc::new(process);
         let writer = Arc::new(Mutex::new(writer));
         let parser = Arc::new(Mutex::new(Parser::new_with_callbacks(
             nz(rect.h),
             nz(rect.w),
-            SCROLLBACK,
+            history,
             Term::default(),
         )));
 
