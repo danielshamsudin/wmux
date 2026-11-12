@@ -461,10 +461,10 @@ impl App {
             Dir::Up => r.y.checked_sub(2).map(|y| (cx, y)),
             Dir::Down => Some((cx, r.y + r.h + 1)),
         };
-        if let Some((x, y)) = probe {
-            if let Some(&(id, _)) = p.iter().find(|(_, r)| r.contains(x, y)) {
-                self.focus(id);
-            }
+        if let Some((x, y)) = probe
+            && let Some(&(id, _)) = p.iter().find(|(_, r)| r.contains(x, y))
+        {
+            self.focus(id);
         }
     }
 
@@ -492,10 +492,10 @@ impl App {
 
     fn remove_pane(&mut self, id: usize) {
         self.panes.remove(&id);
-        if let Some(wi) = self.windows.iter().position(|w| w.root.contains(id)) {
-            if self.windows[wi].remove_pane(id) {
-                self.remove_window(wi);
-            }
+        if let Some(wi) = self.windows.iter().position(|w| w.root.contains(id))
+            && self.windows[wi].remove_pane(id)
+        {
+            self.remove_window(wi);
         }
         if matches!(self.mode, Mode::Scroll(_)) {
             self.mode = Mode::Normal;
@@ -532,11 +532,11 @@ impl App {
             Event::Output(id) => {
                 if self.win().root.contains(id) {
                     self.dirty = true;
-                } else if let Some(w) = self.windows.iter_mut().find(|w| w.root.contains(id)) {
-                    if !w.activity {
-                        w.activity = true;
-                        self.dirty = true;
-                    }
+                } else if let Some(w) = self.windows.iter_mut().find(|w| w.root.contains(id))
+                    && !w.activity
+                {
+                    w.activity = true;
+                    self.dirty = true;
                 }
             }
             Event::Exit(id) => {
@@ -1118,11 +1118,11 @@ impl App {
             Mode::Choose { .. } => grid.text(0, y, "[choose  enter:pick  q:exit] ", hi),
             _ => grid.text(0, y, &format!("[{}] ", self.name), bar),
         };
-        if let Some((m, t)) = &self.message {
-            if t.elapsed() < Duration::from_secs(4) {
-                grid.text(x, y, m, hi);
-                x = self.w; // message replaces the window list
-            }
+        if let Some((m, t)) = &self.message
+            && t.elapsed() < Duration::from_secs(4)
+        {
+            grid.text(x, y, m, hi);
+            x = self.w; // message replaces the window list
         }
         if let Mode::Rename(buf) = &self.mode {
             grid.text(x, y, &format!("(rename-window) {buf}_"), hi);
