@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release (e.g. v0.1.0)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Package binary
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $name = "wmux-$tag-x86_64-pc-windows-msvc.exe"
+          Copy-Item target/release/wmux.exe $name
+          "ASSET=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2.0.8
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: wmux ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: ${{ env.ASSET }}
