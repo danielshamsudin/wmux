@@ -195,10 +195,12 @@ fn main() {
     sleep(Duration::from_millis(2000));
     g.send(b"\x01c", 1500); // Ctrl-a c : with the remap, this makes a 2nd window
     g.show("G: after Ctrl-a c (remapped prefix)");
-    check(g.rows()[19].contains("1:"), "remapped prefix Ctrl-a c created a 2nd window");
+    // Match the window-list entry (N:cmd), not a bare "N:", so the clock in the
+    // status bar (e.g. 12:58 contains "2:") cannot give a false result.
+    check(g.rows()[19].contains("1:cmd"), "remapped prefix Ctrl-a c created a 2nd window");
     g.send(b"\x02c", 1500); // Ctrl-b c : old prefix, now inert -> no 3rd window
     g.show("G: after Ctrl-b c (old prefix, inert)");
-    check(!g.rows()[19].contains("2:"), "old prefix Ctrl-b no longer makes a window");
+    check(!g.rows()[19].contains("2:cmd"), "old prefix Ctrl-b no longer makes a window");
     let _ = wmux(&["kill-session", "-t", "drvcfg"]);
     let _ = std::fs::remove_file(&cfg_path);
 

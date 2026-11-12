@@ -26,6 +26,8 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use crate::render::Color;
+
 /// A prefix command. Keys in the binding table map to one of these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -71,10 +73,15 @@ pub struct Config {
     pub repeat_ms: u64,
     pub history: usize,
     pub default_shell: Option<Vec<String>>,
-    pub status_fg: u8,
-    pub status_bg: u8,
-    pub message_fg: u8,
-    pub message_bg: u8,
+    pub status_fg: Color,
+    pub status_bg: Color,
+    pub message_fg: Color,
+    pub message_bg: Color,
+    /// The active window's label in the status bar.
+    pub window_fg: Color,
+    pub window_bg: Color,
+    /// The active pane's border.
+    pub border: Color,
     pub mouse: bool,
     pub binds: HashMap<Key, Action>,
     /// Problems found while parsing, "line N: ...", for the status bar.
@@ -120,15 +127,79 @@ impl Default for Config {
             repeat_ms: 500,
             history: 10_000,
             default_shell: None,
-            status_fg: 0,
-            status_bg: 2,
-            message_fg: 0,
-            message_bg: 3,
+            status_fg: Color::Idx(0),
+            status_bg: Color::Idx(2),
+            message_fg: Color::Idx(0),
+            message_bg: Color::Idx(3),
+            window_fg: Color::Idx(0),
+            window_bg: Color::Idx(2),
+            border: Color::Idx(2),
             mouse: false,
             binds: default_binds(),
             errors: Vec::new(),
         }
     }
+}
+
+/// The colour knobs a theme sets: status fg/bg, message fg/bg, current-window
+/// fg/bg, active border.
+type Palette = [Color; 7];
+
+const fn rgb(r: u8, g: u8, b: u8) -> Color {
+    Color::Rgb(r, g, b)
+}
+
+/// Built-in themes. Names are matched case-insensitively.
+fn theme(name: &str) -> Option<Palette> {
+    // [status_fg, status_bg, message_fg, message_bg, window_fg, window_bg, border]
+    Some(match name.to_ascii_lowercase().as_str() {
+        "default" => [
+            Color::Idx(0), Color::Idx(2), Color::Idx(0), Color::Idx(3),
+            Color::Idx(0), Color::Idx(2), Color::Idx(2),
+        ],
+        "nord" => [
+            rgb(0xd8, 0xde, 0xe9), rgb(0x3b, 0x42, 0x52), rgb(0x2e, 0x34, 0x40), rgb(0x88, 0xc0, 0xd0),
+            rgb(0x2e, 0x34, 0x40), rgb(0x88, 0xc0, 0xd0), rgb(0x88, 0xc0, 0xd0),
+        ],
+        "gruvbox" => [
+            rgb(0xeb, 0xdb, 0xb2), rgb(0x3c, 0x38, 0x36), rgb(0x28, 0x28, 0x28), rgb(0xfa, 0xbd, 0x2f),
+            rgb(0x28, 0x28, 0x28), rgb(0xb8, 0xbb, 0x26), rgb(0xb8, 0xbb, 0x26),
+        ],
+        "dracula" => [
+            rgb(0xf8, 0xf8, 0xf2), rgb(0x44, 0x47, 0x5a), rgb(0x28, 0x2a, 0x36), rgb(0xbd, 0x93, 0xf9),
+            rgb(0x28, 0x2a, 0x36), rgb(0x50, 0xfa, 0x7b), rgb(0xbd, 0x93, 0xf9),
+        ],
+        "catppuccin" => [
+            rgb(0xcd, 0xd6, 0xf4), rgb(0x31, 0x32, 0x44), rgb(0x11, 0x11, 0x1b), rgb(0x89, 0xb4, 0xfa),
+            rgb(0x11, 0x11, 0x1b), rgb(0xa6, 0xe3, 0xa1), rgb(0x89, 0xb4, 0xfa),
+        ],
+        "solarized" => [
+            rgb(0x93, 0xa1, 0xa1), rgb(0x07, 0x36, 0x42), rgb(0x00, 0x2b, 0x36), rgb(0xb5, 0x89, 0x00),
+            rgb(0x00, 0x2b, 0x36), rgb(0x85, 0x99, 0x00), rgb(0x26, 0x8b, 0xd2),
+        ],
+        "tokyonight" => [
+            rgb(0xa9, 0xb1, 0xd6), rgb(0x24, 0x28, 0x3b), rgb(0x1a, 0x1b, 0x26), rgb(0x7a, 0xa2, 0xf7),
+            rgb(0x1a, 0x1b, 0x26), rgb(0x9e, 0xce, 0x6a), rgb(0x7a, 0xa2, 0xf7),
+        ],
+        _ => return None,
+    })
+}
+
+/// Map a tpm `@plugin 'owner/repo'` value to a built-in theme, when the repo is
+/// a known theme plugin. Other plugins have no wmux equivalent.
+fn theme_from_plugin(repo: &str) -> Option<&'static str> {
+    let r = repo.to_ascii_lowercase();
+    ["catppuccin", "nord", "dracula", "gruvbox", "tokyonight", "solarized"]
+        .into_iter()
+        .find(|&t| r.contains(t))
+}
+
+/// Which colour pair a style/`fg=`/`bg=` line touches.
+#[derive(Clone, Copy)]
+enum Slot {
+    Status,
+    Message,
+    Window,
 }
 
 /// Where the config file lives: `$WMUX_CONFIG`, else `~/.wmux.conf`.
@@ -167,7 +238,10 @@ fn tokenize(line: &str) -> Vec<String> {
                 }
             }
             None => match c {
-                '#' => break,
+                // `#` starts a comment only at a token boundary, so a mid-token
+                // `#` is literal (e.g. `bg=#1a1b26`). A standalone hex colour must
+                // be quoted ("#1a1b26"), as in tmux.
+                '#' if !started => break,
                 '\'' | '"' => {
                     quote = Some(c);
                     started = true;
@@ -191,13 +265,21 @@ fn tokenize(line: &str) -> Vec<String> {
     out
 }
 
-fn parse_color(s: &str) -> Option<u8> {
+fn parse_color(s: &str) -> Option<Color> {
     let s = s.trim();
-    let s = s.strip_prefix("colour").or_else(|| s.strip_prefix("color")).unwrap_or(s);
-    if let Ok(n) = s.parse::<u8>() {
-        return Some(n);
+    // #rrggbb (also accepts #RRGGBB) -> true colour.
+    if let Some(hex) = s.strip_prefix('#')
+        && hex.len() == 6
+        && let Ok(v) = u32::from_str_radix(hex, 16)
+    {
+        return Some(Color::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8));
     }
-    Some(match s.to_ascii_lowercase().as_str() {
+    let body = s.strip_prefix("colour").or_else(|| s.strip_prefix("color")).unwrap_or(s);
+    if let Ok(n) = body.parse::<u8>() {
+        return Some(Color::Idx(n));
+    }
+    Some(Color::Idx(match s.to_ascii_lowercase().as_str() {
+        "default" => return Some(Color::Default),
         "black" => 0,
         "red" => 1,
         "green" => 2,
@@ -207,7 +289,7 @@ fn parse_color(s: &str) -> Option<u8> {
         "cyan" => 6,
         "white" => 7,
         _ => return None,
-    })
+    }))
 }
 
 /// Parse a key spec like `C-a`, `|`, `C-Space`, `Up`, `F5`.
@@ -336,9 +418,25 @@ impl Config {
                     "message-bg" => self.message_bg = parse_color(val).ok_or_else(|| format!("bad colour: {val}"))?,
                     // tmux combined styles: fg=... ,bg=... (hex and unknown names skipped).
                     "status-style" | "status-left-style" | "status-right-style" => {
-                        self.set_style(args, false)
+                        self.set_style(args, Slot::Status)
                     }
-                    "message-style" | "message-command-style" => self.set_style(args, true),
+                    "message-style" | "message-command-style" => self.set_style(args, Slot::Message),
+                    "window-status-current-style" => self.set_style(args, Slot::Window),
+                    // Themes: `set theme nord`. A named colour scheme in one line.
+                    "theme" => {
+                        if !self.apply_theme(val) {
+                            return Err(format!("unknown theme: {val}"));
+                        }
+                    }
+                    // tpm-style hooks: pick a built-in theme and ignore the rest.
+                    "@theme" | "@wmux-theme" | "@wmux_theme" => {
+                        self.apply_theme(val);
+                    }
+                    "@plugin" => {
+                        if let Some(t) = theme_from_plugin(val) {
+                            self.apply_theme(t);
+                        }
+                    }
                     "mouse" => {
                         self.mouse = match val {
                             "on" | "1" | "true" | "yes" => true,
@@ -410,20 +508,42 @@ impl Config {
         Ok(())
     }
 
-    /// Apply a tmux style string's `fg=`/`bg=` parts. `message` picks the message
-    /// colours, otherwise the status bar. Parts we cannot map (hex, `default`,
-    /// attributes like `bold`) are skipped.
-    fn set_style(&mut self, args: &[String], message: bool) {
+    /// Apply a named built-in theme. Returns false for an unknown name.
+    fn apply_theme(&mut self, name: &str) -> bool {
+        match theme(name) {
+            Some(p) => {
+                [
+                    self.status_fg,
+                    self.status_bg,
+                    self.message_fg,
+                    self.message_bg,
+                    self.window_fg,
+                    self.window_bg,
+                    self.border,
+                ] = p;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Apply a tmux style string's `fg=`/`bg=` parts to one colour pair. Parts we
+    /// cannot map (`default` aside, `bold` and other attributes) are skipped.
+    fn set_style(&mut self, args: &[String], slot: Slot) {
+        let (fg, bg) = match slot {
+            Slot::Status => (&mut self.status_fg, &mut self.status_bg),
+            Slot::Message => (&mut self.message_fg, &mut self.message_bg),
+            Slot::Window => (&mut self.window_fg, &mut self.window_bg),
+        };
         for part in args.iter().flat_map(|a| a.split(',')) {
-            let (slot, val) = if let Some(v) = part.strip_prefix("fg=") {
-                (if message { &mut self.message_fg } else { &mut self.status_fg }, v)
-            } else if let Some(v) = part.strip_prefix("bg=") {
-                (if message { &mut self.message_bg } else { &mut self.status_bg }, v)
-            } else {
-                continue;
-            };
-            if let Some(c) = parse_color(val) {
-                *slot = c;
+            if let Some(v) = part.strip_prefix("fg=")
+                && let Some(c) = parse_color(v)
+            {
+                *fg = c;
+            } else if let Some(v) = part.strip_prefix("bg=")
+                && let Some(c) = parse_color(v)
+            {
+                *bg = c;
             }
         }
     }
@@ -447,7 +567,39 @@ mod tests {
         assert_eq!(c.prefix_byte, Some(0x01));
         assert_eq!(c.repeat_ms, 300);
         assert_eq!(c.history, 50_000);
-        assert_eq!(c.status_bg, 4);
+        assert_eq!(c.status_bg, Color::Idx(4));
+    }
+
+    #[test]
+    fn themes_and_hex() {
+        let c = apply("set theme nord\n");
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        assert_eq!(c.status_bg, Color::Rgb(0x3b, 0x42, 0x52));
+        assert_eq!(c.border, Color::Rgb(0x88, 0xc0, 0xd0));
+
+        // An explicit colour after the theme overrides just that slot. A bare
+        // hex value must be quoted so its `#` is not read as a comment; a hex
+        // inside a style string (bg=#...) needs no quotes.
+        let c = apply("set theme nord\nset status-bg red\nset message-bg \"#1a2b3c\"\nset status-style bg=#102030\n");
+        assert_eq!(c.status_bg, Color::Rgb(0x10, 0x20, 0x30));
+        assert_eq!(c.message_bg, Color::Rgb(0x1a, 0x2b, 0x3c));
+
+        // An unknown theme name is reported (it is a wmux-native setting).
+        let c = apply("set theme nope\n");
+        assert_eq!(c.errors.len(), 1);
+    }
+
+    #[test]
+    fn tpm_theme_plugins_map_to_a_theme() {
+        let c = apply(
+            "set -g @plugin 'catppuccin/tmux'\n\
+             set -g @plugin 'tmux-plugins/tmux-resurrect'\n\
+             run '~/.tmux/plugins/tpm/tpm'\n",
+        );
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        assert_eq!(c.status_bg, Color::Rgb(0x31, 0x32, 0x44)); // catppuccin
+        let c = apply("set -g @wmux_theme dracula\n");
+        assert_eq!(c.border, Color::Rgb(0xbd, 0x93, 0xf9));
     }
 
     #[test]
@@ -500,9 +652,9 @@ run -b '~/.tmux/plugins/tpm/tpm'
         assert_eq!(c.prefix, (KeyModifiers::CONTROL, KeyCode::Char('a')));
         assert!(c.mouse);
         assert_eq!(c.history, 20_000);
-        assert_eq!(c.status_fg, 7); // white
-        assert_eq!(c.status_bg, 236); // colour236
-        assert_eq!(c.message_bg, 1); // red (brightwhite unknown -> fg unchanged)
+        assert_eq!(c.status_fg, Color::Idx(7)); // white
+        assert_eq!(c.status_bg, Color::Idx(236)); // colour236
+        assert_eq!(c.message_bg, Color::Idx(1)); // red (brightwhite unknown -> fg unchanged)
         // Supported binds applied; unmappable/non-prefix ones silently skipped.
         assert_eq!(c.binds.get(&(KeyModifiers::NONE, KeyCode::Char('|'))), Some(&Action::SplitH));
         assert_eq!(c.binds.get(&(KeyModifiers::NONE, KeyCode::Char('-'))), Some(&Action::SplitV));

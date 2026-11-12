@@ -16,14 +16,28 @@ set history-limit 50000   # scrollback lines kept per pane
 set mouse on              # click panes, wheel-scroll, drag-select (default off)
 # set default-shell pwsh -NoLogo -NoProfile   # overrides WMUX_SHELL / the auto-pick
 
-# Colours are a palette index 0-255, a `colourN` name, or one of:
+# --- theme ------------------------------------------------------------------
+# A theme sets all the colours at once. Built-in: default, nord, gruvbox,
+# dracula, catppuccin, solarized, tokyonight.
+# set theme nord
+
+# Using a tmux theme plugin? wmux has no plugin runtime, but it maps a known
+# theme plugin to the matching built-in theme, so these also just work:
+# set -g @plugin 'catppuccin/tmux'
+# set -g @wmux_theme gruvbox
+
+# --- individual colours (override a theme line below it) --------------------
+# A colour is a palette index 0-255, a `colourN` name, a `#rrggbb` hex value
+# (quote a bare one so its # is not a comment), or one of:
 # black red green yellow blue magenta cyan white
 set status-fg 0
 set status-bg 2           # status bar
 set message-fg 0
 set message-bg 3          # the transient message / highlight
+# set window-status-current-style fg=black,bg=cyan   # the active window label
+# set status-bg "#1a1b26"                             # a bare hex needs quotes
 
-# tmux combined styles also work (only fg=/bg= are read):
+# tmux combined styles also work (only the fg=/bg= parts are read):
 # set -g status-style fg=white,bg=colour236
 # set -g message-style fg=black,bg=yellow
 

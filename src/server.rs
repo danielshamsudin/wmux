@@ -1092,15 +1092,16 @@ impl App {
                 let near_active = [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
                     .iter()
                     .any(|&(nx, ny)| nx >= 0 && ny >= 0 && active_rect.contains(nx as u16, ny as u16));
-                let style = if near_active { Style::fg(Color::Idx(2)) } else { Style::DEFAULT };
+                let style = if near_active { Style::fg(self.cfg.border) } else { Style::DEFAULT };
                 grid.set(x as u16, y as u16, ch, style, false);
             }
         }
 
         // Status bar, tmux style.
         let y = self.h.saturating_sub(1);
-        let bar = Style { fg: Color::Idx(self.cfg.status_fg), bg: Color::Idx(self.cfg.status_bg), attrs: 0 };
-        let hi = Style { fg: Color::Idx(self.cfg.message_fg), bg: Color::Idx(self.cfg.message_bg), attrs: 0 };
+        let bar = Style { fg: self.cfg.status_fg, bg: self.cfg.status_bg, attrs: 0 };
+        let hi = Style { fg: self.cfg.message_fg, bg: self.cfg.message_bg, attrs: 0 };
+        let cur = Style { fg: self.cfg.window_fg, bg: self.cfg.window_bg, attrs: 0 };
         for x in 0..self.w {
             grid.set(x, y, " ", bar, false);
         }
@@ -1138,7 +1139,8 @@ impl App {
                     ""
                 };
                 let zoom = if wd.zoomed { "Z" } else { "" };
-                x = grid.text(x, y, &format!("{i}:{}{flag}{zoom} ", wd.name), bar);
+                let style = if i == self.active { cur } else { bar };
+                x = grid.text(x, y, &format!("{i}:{}{flag}{zoom} ", wd.name), style);
             }
         }
         let clock = chrono::Local::now().format(" %H:%M %d-%b-%y ").to_string();
@@ -1151,8 +1153,8 @@ impl App {
         if let Mode::Choose { names, sel } = &self.mode {
             let title = "(choose-session)";
             let box_w = names.iter().map(|n| n.chars().count()).max().unwrap_or(0).max(title.len()) as u16 + 3;
-            let norm = Style { fg: Color::Idx(self.cfg.status_fg), bg: Color::Idx(self.cfg.status_bg), attrs: 0 };
-            let selbg = Style { fg: Color::Idx(self.cfg.message_fg), bg: Color::Idx(self.cfg.message_bg), attrs: 0 };
+            let norm = Style { fg: self.cfg.status_fg, bg: self.cfg.status_bg, attrs: 0 };
+            let selbg = Style { fg: self.cfg.message_fg, bg: self.cfg.message_bg, attrs: 0 };
             let pad = |s: String, w: u16| {
                 let mut s = s;
                 while (s.chars().count() as u16) < w {

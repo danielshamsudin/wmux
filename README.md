@@ -32,11 +32,10 @@ set prefix C-a              # prefix key (default C-b); C-a, M-x, a bare char
 set repeat-time 300         # ms an arrow repeat stays live after the prefix
 set history-limit 50000     # scrollback lines per pane
 set default-shell pwsh -NoLogo
-set status-bg 4             # status bar colours: 0-255, colourN, or a name
-set status-fg 7
-set message-fg 7
-set message-bg 1
 set mouse on                # click panes, wheel-scroll, drag-select (default off)
+set theme nord              # a named colour theme (see below)
+set status-bg 4             # or set colours yourself; overrides a theme line
+set status-fg 7
 bind | split-window -h      # rebind a prefix key to an action
 bind _ split-window -v
 unbind '"'
@@ -47,18 +46,33 @@ Bindable actions: `split-window -h|-v` (or `split-h`/`split-v`), `next-pane`,
 `previous-window`, `last-window`, `select-window N`, `zoom`, `copy-mode`,
 `paste`, `rename-window`, `detach`, `choose-session`, `list-keys`.
 
+### Themes
+
+`set theme <name>` applies a colour scheme in one line. Built-in themes:
+`default`, `nord`, `gruvbox`, `dracula`, `catppuccin`, `solarized`,
+`tokyonight`. Set individual colours after a theme line to override just those
+(`status-fg/bg`, `message-fg/bg`, `window-status-current-style`, and the pane
+border via `status-style`-less knobs). A colour is a palette index `0-255`, a
+`colourN` name, a `#rrggbb` hex value (quote a bare one, `"#1a1b26"`, so its `#`
+is not read as a comment), or a basic name (`black red green yellow blue
+magenta cyan white`).
+
+wmux can't run tmux plugins (no plugin runtime), but a **theme** plugin maps to
+the matching built-in theme, so `set -g @plugin 'catppuccin/tmux'` or
+`set -g @wmux_theme dracula` just set the theme. Non-theme plugins are ignored.
+
 ### Using an existing `.tmux.conf`
 
 Point `WMUX_CONFIG` at your `~/.tmux.conf` and it mostly works as a drop-in.
 wmux applies what it understands — `prefix`, `mouse`, `history-limit`,
-`repeat-time`, `status-style`/`message-style` (the `fg=`/`bg=` parts), and the
-bindable actions above (including `bind` with `-r`, and `unbind -a`) — and
-silently ignores the rest: `mode-keys`, `status-left`, plugins, `source-file`,
-`run-shell`, directional `resize-pane` binds, non-prefix key tables (`-n`,
-`-T`), and any option or command it does not recognise. `set-option`/`setw` and
-a leading `-g`/`-a` are accepted. Only a malformed value for a setting wmux
-*does* support (a bad key, number, or colour) is reported, in the status bar;
-the rest of the file still applies.
+`repeat-time`, `status-style`/`message-style` (the `fg=`/`bg=` parts), theme
+plugins, and the bindable actions above (including `bind` with `-r`, and
+`unbind -a`) — and silently ignores the rest: `mode-keys`, `status-left`,
+non-theme plugins, `source-file`, `run-shell`, directional `resize-pane` binds,
+non-prefix key tables (`-n`, `-T`), and any option or command it does not
+recognise. `set-option`/`setw` and a leading `-g`/`-a` are accepted. Only a
+malformed value for a setting wmux *does* support (a bad key, number, or
+colour) is reported, in the status bar; the rest of the file still applies.
 
 ## How sessions work
 
