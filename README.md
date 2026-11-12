@@ -25,6 +25,7 @@ Run `wmux kill-server` before you rebuild: a running server locks `wmux.exe`.
 
 wmux reads a tmux.conf-style file at `%WMUX_CONFIG%`, else `%USERPROFILE%\.wmux.conf`,
 once when a session's server starts. One command per line; `#` starts a comment.
+A full, commented sample is in [`wmux.conf.sample`](wmux.conf.sample).
 
 ```
 set prefix C-a              # prefix key (default C-b); C-a, M-x, a bare char
@@ -41,12 +42,23 @@ bind _ split-window -v
 unbind '"'
 ```
 
-A leading `-g` is ignored, so lines copied from a `.tmux.conf` mostly work.
 Bindable actions: `split-window -h|-v` (or `split-h`/`split-v`), `next-pane`,
 `last-pane`, `kill-pane`, `kill-window`, `new-window`, `next-window`,
 `previous-window`, `last-window`, `select-window N`, `zoom`, `copy-mode`,
-`paste`, `rename-window`, `detach`, `choose-session`, `list-keys`. A bad line
-is skipped and reported in the status bar; the rest of the file still applies.
+`paste`, `rename-window`, `detach`, `choose-session`, `list-keys`.
+
+### Using an existing `.tmux.conf`
+
+Point `WMUX_CONFIG` at your `~/.tmux.conf` and it mostly works as a drop-in.
+wmux applies what it understands — `prefix`, `mouse`, `history-limit`,
+`repeat-time`, `status-style`/`message-style` (the `fg=`/`bg=` parts), and the
+bindable actions above (including `bind` with `-r`, and `unbind -a`) — and
+silently ignores the rest: `mode-keys`, `status-left`, plugins, `source-file`,
+`run-shell`, directional `resize-pane` binds, non-prefix key tables (`-n`,
+`-T`), and any option or command it does not recognise. `set-option`/`setw` and
+a leading `-g`/`-a` are accepted. Only a malformed value for a setting wmux
+*does* support (a bad key, number, or colour) is reported, in the status bar;
+the rest of the file still applies.
 
 ## How sessions work
 

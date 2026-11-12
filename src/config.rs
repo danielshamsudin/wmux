@@ -272,7 +272,10 @@ fn parse_action(tok: &[String]) -> Option<Action> {
         "previous-window" | "prev" => Action::PrevWindow,
         "last-window" => Action::LastWindow,
         "select-window" | "selectw" => Action::SelectWindow(tok.get(1)?.parse().ok()?),
-        "zoom" | "zoom-pane" | "resize-pane" => Action::Zoom,
+        "zoom" | "zoom-pane" => Action::Zoom,
+        // resize-pane only maps when it is the zoom toggle (-Z); directional
+        // resizes (resize-pane -L 5) are not representable, so they are ignored.
+        "resize-pane" | "resizep" if has("-Z") => Action::Zoom,
         "copy-mode" | "copy" => Action::CopyMode,
         "paste" | "paste-buffer" => Action::Paste,
         "rename-window" | "rename" => Action::RenameWindow,
@@ -331,6 +334,11 @@ impl Config {
                     "status-bg" => self.status_bg = parse_color(val).ok_or_else(|| format!("bad colour: {val}"))?,
                     "message-fg" => self.message_fg = parse_color(val).ok_or_else(|| format!("bad colour: {val}"))?,
                     "message-bg" => self.message_bg = parse_color(val).ok_or_else(|| format!("bad colour: {val}"))?,
+                    // tmux combined styles: fg=... ,bg=... (hex and unknown names skipped).
+                    "status-style" | "status-left-style" | "status-right-style" => {
+                        self.set_style(args, false)
+                    }
+                    "message-style" | "message-command-style" => self.set_style(args, true),
                     "mouse" => {
                         self.mouse = match val {
                             "on" | "1" | "true" | "yes" => true,
@@ -338,25 +346,86 @@ impl Config {
                             _ => return Err(format!("mouse wants on/off: {val}")),
                         }
                     }
-                    _ => return Err(format!("unknown option: {name}")),
+                    // Any other tmux option (mode-keys, status-left, @plugin, ...) is
+                    // ignored, so an existing .tmux.conf drops in without a wall of errors.
+                    _ => {}
                 }
             }
             "bind" | "bind-key" => {
-                let key = tok.get(1).ok_or("bind needs a key")?;
-                let key = parse_key(key).ok_or_else(|| format!("bad key: {key}"))?;
-                let action = parse_action(&tok[2..]).ok_or_else(|| {
-                    format!("unknown action: {}", tok[2..].join(" "))
-                })?;
-                self.binds.insert(key, action);
+                // Skip flags; -n or -T <non-prefix> means a non-prefix binding we
+                // cannot represent, so ignore it. -r/-N and their args are skipped.
+                let mut rest = &tok[1..];
+                let mut prefix_table = true;
+                while let Some(f) = rest.first().filter(|f| f.starts_with('-')).cloned() {
+                    rest = &rest[1..];
+                    match f.as_str() {
+                        "-n" => prefix_table = false,
+                        "-T" => {
+                            if rest.first().map(|s| s.as_str()) != Some("prefix") {
+                                prefix_table = false;
+                            }
+                            rest = &rest[1.min(rest.len())..];
+                        }
+                        "-N" => rest = &rest[1.min(rest.len())..], // note takes an arg
+                        _ => {}
+                    }
+                }
+                // Map what we can; an unknown key or action is ignored, not an error.
+                if prefix_table
+                    && let Some(key) = rest.first().and_then(|k| parse_key(k))
+                    && let Some(action) = parse_action(&rest[1..])
+                {
+                    self.binds.insert(key, action);
+                }
             }
             "unbind" | "unbind-key" => {
-                let key = tok.get(1).ok_or("unbind needs a key")?;
-                let key = parse_key(key).ok_or_else(|| format!("bad key: {key}"))?;
-                self.binds.remove(&key);
+                let mut rest = &tok[1..];
+                let (mut all, mut prefix_table) = (false, true);
+                while let Some(f) = rest.first().filter(|f| f.starts_with('-')).cloned() {
+                    rest = &rest[1..];
+                    match f.as_str() {
+                        "-a" => all = true,
+                        "-n" => prefix_table = false,
+                        "-T" => {
+                            if rest.first().map(|s| s.as_str()) != Some("prefix") {
+                                prefix_table = false;
+                            }
+                            rest = &rest[1.min(rest.len())..];
+                        }
+                        _ => {}
+                    }
+                }
+                if all {
+                    self.binds.clear();
+                } else if prefix_table
+                    && let Some(key) = rest.first().and_then(|k| parse_key(k))
+                {
+                    self.binds.remove(&key);
+                }
             }
-            other => return Err(format!("unknown command: {other}")),
+            // Any other tmux command (source-file, run-shell, if-shell, set-hook,
+            // new-window, ...) is ignored for drop-in compatibility.
+            _ => {}
         }
         Ok(())
+    }
+
+    /// Apply a tmux style string's `fg=`/`bg=` parts. `message` picks the message
+    /// colours, otherwise the status bar. Parts we cannot map (hex, `default`,
+    /// attributes like `bold`) are skipped.
+    fn set_style(&mut self, args: &[String], message: bool) {
+        for part in args.iter().flat_map(|a| a.split(',')) {
+            let (slot, val) = if let Some(v) = part.strip_prefix("fg=") {
+                (if message { &mut self.message_fg } else { &mut self.status_fg }, v)
+            } else if let Some(v) = part.strip_prefix("bg=") {
+                (if message { &mut self.message_bg } else { &mut self.status_bg }, v)
+            } else {
+                continue;
+            };
+            if let Some(c) = parse_color(val) {
+                *slot = c;
+            }
+        }
     }
 }
 
@@ -398,9 +467,47 @@ mod tests {
 
     #[test]
     fn errors_are_collected_not_fatal() {
+        // A malformed value for a supported option is reported; an unknown
+        // command is ignored (drop-in). The good line still applies.
         let c = apply("set prefix\nbogus-command\nset repeat-time 100\n");
-        assert_eq!(c.errors.len(), 2);
-        assert_eq!(c.repeat_ms, 100); // the good line still applied
+        assert_eq!(c.errors.len(), 1);
+        assert_eq!(c.repeat_ms, 100);
+    }
+
+    #[test]
+    fn tmux_conf_drops_in_without_errors() {
+        let conf = "\
+# a real-ish .tmux.conf
+set -g prefix C-a
+unbind C-b
+set -g mouse on
+setw -g mode-keys vi
+set -g history-limit 20000
+set -g status-style fg=white,bg=colour236
+set -g message-style bg=red,fg=brightwhite
+set -g status-left '#S '
+bind -r H resize-pane -L 5
+bind -n M-Left select-pane -L
+bind -T copy-mode-vi v send -X begin-selection
+bind | split-window -h
+bind - split-window -v
+bind r source-file ~/.tmux.conf
+set -g @plugin 'tmux-plugins/tpm'
+run -b '~/.tmux/plugins/tpm/tpm'
+";
+        let c = apply(conf);
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        assert_eq!(c.prefix, (KeyModifiers::CONTROL, KeyCode::Char('a')));
+        assert!(c.mouse);
+        assert_eq!(c.history, 20_000);
+        assert_eq!(c.status_fg, 7); // white
+        assert_eq!(c.status_bg, 236); // colour236
+        assert_eq!(c.message_bg, 1); // red (brightwhite unknown -> fg unchanged)
+        // Supported binds applied; unmappable/non-prefix ones silently skipped.
+        assert_eq!(c.binds.get(&(KeyModifiers::NONE, KeyCode::Char('|'))), Some(&Action::SplitH));
+        assert_eq!(c.binds.get(&(KeyModifiers::NONE, KeyCode::Char('-'))), Some(&Action::SplitV));
+        assert_eq!(c.binds.get(&(KeyModifiers::NONE, KeyCode::Char('H'))), None);
+        assert_eq!(c.binds.get(&(KeyModifiers::NONE, KeyCode::Char('r'))), None);
     }
 
     #[test]

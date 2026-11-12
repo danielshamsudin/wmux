@@ -1,0 +1,47 @@
+# wmux sample config
+#
+# Copy this to %USERPROFILE%\.wmux.conf (e.g. C:\Users\you\.wmux.conf), or point
+# the WMUX_CONFIG environment variable at it. wmux reads it once when a session
+# server starts, so run `wmux kill-server` (or start a new session) after edits.
+#
+# Syntax is tmux.conf-style: one command per line, `#` starts a comment, and a
+# leading `-g` is accepted. Options or commands wmux does not know are ignored,
+# so an existing .tmux.conf mostly works as a drop-in (see the note at the end).
+
+# --- options ---------------------------------------------------------------
+
+set prefix C-a            # prefix key (default C-b). e.g. C-a, C-Space, a bare char
+set repeat-time 300       # ms an arrow repeat stays live after the prefix
+set history-limit 50000   # scrollback lines kept per pane
+set mouse on              # click panes, wheel-scroll, drag-select (default off)
+# set default-shell pwsh -NoLogo -NoProfile   # overrides WMUX_SHELL / the auto-pick
+
+# Colours are a palette index 0-255, a `colourN` name, or one of:
+# black red green yellow blue magenta cyan white
+set status-fg 0
+set status-bg 2           # status bar
+set message-fg 0
+set message-bg 3          # the transient message / highlight
+
+# tmux combined styles also work (only fg=/bg= are read):
+# set -g status-style fg=white,bg=colour236
+# set -g message-style fg=black,bg=yellow
+
+# --- key bindings ----------------------------------------------------------
+# bind <key> <action>   /   unbind <key>
+# Actions: split-window -h|-v (or split-h / split-v), next-pane, last-pane,
+# kill-pane, kill-window, new-window, next-window, previous-window, last-window,
+# select-window N, zoom, copy-mode, paste, rename-window, detach,
+# choose-session, list-keys.
+
+bind | split-window -h    # add | as an alias for the % horizontal split
+bind _ split-window -v    # and _ for the " vertical split
+# unbind '"'              # remove a default binding
+
+# --- using an existing .tmux.conf ------------------------------------------
+# You can point WMUX_CONFIG straight at your ~/.tmux.conf. wmux applies the
+# parts it understands (prefix, mouse, history-limit, styles, the bindable
+# actions above) and silently ignores the rest (mode-keys, status-left,
+# plugins, source-file, directional resize binds, non-prefix key tables, ...).
+# Only a malformed value for a setting wmux *does* support is reported, in the
+# status bar.
